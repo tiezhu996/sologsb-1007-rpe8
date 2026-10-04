@@ -10,14 +10,41 @@ import {
   createSignal,
   onCleanup,
   onMount,
-  untrack,
 } from "solid-js";
 import { createSeedProject, uid } from "../data";
 import { downloadText, formatTime, loadProject, parseTime, saveProject } from "../persistence";
-import type { Confidence, PersistedEnvelope, ProjectData, Segment, TranscriptTrack } from "../types";
+import {
+  MergeEngine,
+  OPS_KEY,
+  appendToLog,
+  diffProjects,
+  loadPending,
+  loadProofreader,
+  readOps,
+  savePending,
+  saveProofreader,
+} from "../sync";
+import type {
+  Confidence,
+  ConflictField,
+  ConflictSide,
+  FieldOp,
+  PendingConflict,
+  ProjectData,
+  Segment,
+  TranscriptTrack,
+} from "../types";
 
 const CHANNEL_NAME = "sologsb-1007-editor";
 const TAB_ID = uid("tab");
+
+const FIELD_LABELS: Record<ConflictField, string> = {
+  text: "转写文本",
+  speakerId: "发言人",
+  start: "开始时间",
+  end: "结束时间",
+  confidence: "置信度",
+};
 
 function statusText(status: "saved" | "saving" | "offline") {
   if (status === "saving") return "正在保存";
@@ -101,15 +128,33 @@ function parseTimedTranscript(input: string, trackName: string): TranscriptTrack
 }
 
 export default function OralHistoryEditor() {
+  // 启动：载入快照，再把快照之后追加的字段操作逐笔折叠进来（含本标签页离线期间的变更）。
   const loaded = loadProject();
-  const [project, setProject] = createSignal<ProjectData>(loaded.project);
+  const engine = new MergeEngine(loadPending());
+  const bootOps = readOps();
+  engine.prime(bootOps.slice(0, loaded.opCursor));
+  const bootProject = structuredClone(loaded.project);
+  for (let index = loaded.opCursor; index < bootOps.length; index += 1) {
+    try {
+      engine.apply(bootProject, bootOps[index], index);
+    } catch {
+      // 单笔损坏的操作跳过，不阻塞其余合并。
+    }
+  }
+  let cursor = bootOps.length;
+  let ownRecent: FieldOp[] = [];
+  savePending([...engine.pending.values()]);
+
+  const [project, setProject] = createSignal<ProjectData>(bootProject);
   const [revision, setRevision] = createSignal(loaded.revision);
   const [past, setPast] = createSignal<ProjectData[]>([]);
   const [future, setFuture] = createSignal<ProjectData[]>([]);
-  const [selectedId, setSelectedId] = createSignal(loaded.project.tracks[0]?.segments[0]?.id ?? "");
+  const [selectedId, setSelectedId] = createSignal(bootProject.tracks[0]?.segments[0]?.id ?? "");
   const [saveStatus, setSaveStatus] = createSignal<"saved" | "saving" | "offline">("saved");
   const [lastAction, setLastAction] = createSignal("示例项目已就绪");
-  const [conflict, setConflict] = createSignal<PersistedEnvelope | null>(null);
+  const [pendingList, setPendingList] = createSignal<PendingConflict[]>([...engine.pending.values()]);
+  const [mergeOpen, setMergeOpen] = createSignal(false);
+  const [proofreader, setProofreader] = createSignal(loadProofreader());
   const [online, setOnline] = createSignal(true);
   const [helpOpen, setHelpOpen] = createSignal(false);
   const [commentDraft, setCommentDraft] = createSignal("");
@@ -119,7 +164,6 @@ export default function OralHistoryEditor() {
   let fileInputRef: HTMLInputElement | undefined;
   let saveTimer: number | undefined;
   let hydrated = false;
-  let dirty = false;
 
   const channel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel(CHANNEL_NAME) : null;
   const activeTrack = createMemo(() => {
@@ -138,15 +182,70 @@ export default function OralHistoryEditor() {
     if (!segments.length) return 0;
     return Math.round((segments.filter((segment) => segment.reviewed).length / segments.length) * 100);
   });
+  const pendingBySegment = createMemo(() => {
+    const map = new Map<string, number>();
+    for (const conflict of pendingList()) {
+      map.set(conflict.segmentId, (map.get(conflict.segmentId) ?? 0) + 1);
+    }
+    return map;
+  });
   const speakerById = (speakerId: string) =>
     project().speakers.find((speaker) => speaker.id === speakerId) ?? project().speakers[0];
   const tagById = (tagId: string) => project().tags.find((tag) => tag.id === tagId);
 
+  const syncPendingView = () => {
+    const list = [...engine.pending.values()];
+    setPendingList(list);
+    savePending(list);
+  };
+
+  /**
+   * 只在字段层合并：读取共享操作日志里还没处理的追加变更，逐笔折叠进当前草稿。
+   * 合并失败时不动现有状态——双方变更仍在操作日志与待合并区里，重开页面可继续。
+   */
+  const catchUp = () => {
+    if (typeof localStorage === "undefined") return;
+    try {
+      let log = readOps();
+      if (ownRecent.length) {
+        if (!ownRecent.every((op) => log.some((item) => item.id === op.id))) {
+          log = appendToLog(ownRecent);
+        }
+        ownRecent = [];
+      }
+      if (log.length <= cursor) return;
+      const next = structuredClone(project());
+      for (let index = cursor; index < log.length; index += 1) {
+        try {
+          engine.apply(next, log[index], index);
+        } catch {
+          // 单笔损坏的操作跳过，不阻塞其余合并。
+        }
+      }
+      cursor = log.length;
+      setProject(next);
+      syncPendingView();
+    } catch {
+      setLastAction("合并失败：双方变更已保留在操作日志与待合并区，重开页面可继续处理");
+    }
+  };
+
+  /** 本地变更以追加式字段操作写入共享日志，再广播给其他标签页。 */
+  const appendOps = (ops: FieldOp[]) => {
+    if (!ops.length) return;
+    appendToLog(ops);
+    ownRecent = ops;
+    channel?.postMessage({ type: "ops", tabId: TAB_ID });
+    catchUp();
+  };
+
   const commit = (label: string, mutate: (draft: ProjectData) => void) => {
+    catchUp();
     const current = structuredClone(project());
     const next = structuredClone(current);
     mutate(next);
     next.updatedAt = new Date().toISOString();
+    const ops = diffProjects(current, next, { tabId: TAB_ID, author: proofreader(), baseRevision: cursor });
     batch(() => {
       setPast((items) => [...items.slice(-49), current]);
       setFuture([]);
@@ -154,7 +253,7 @@ export default function OralHistoryEditor() {
       setRevision((value) => value + 1);
       setLastAction(label);
     });
-    dirty = true;
+    if (ops.length) appendOps(ops);
   };
 
   const commitSegment = (label: string, mutate: (segment: Segment, draft: ProjectData) => void) => {
@@ -170,24 +269,28 @@ export default function OralHistoryEditor() {
     const stack = past();
     if (!stack.length) return;
     const previous = stack[stack.length - 1];
-    setFuture((items) => [structuredClone(project()), ...items].slice(0, 50));
+    const current = project();
+    setFuture((items) => [structuredClone(current), ...items].slice(0, 50));
     setPast(stack.slice(0, -1));
     setProject(previous);
     setRevision((value) => value + 1);
     setLastAction("已撤销上一步");
-    dirty = true;
+    const ops = diffProjects(current, previous, { tabId: TAB_ID, author: proofreader(), baseRevision: cursor });
+    if (ops.length) appendOps(ops);
   };
 
   const redo = () => {
     const stack = future();
     if (!stack.length) return;
     const next = stack[0];
-    setPast((items) => [...items.slice(-49), structuredClone(project())]);
+    const current = project();
+    setPast((items) => [...items.slice(-49), structuredClone(current)]);
     setFuture(stack.slice(1));
     setProject(next);
     setRevision((value) => value + 1);
     setLastAction("已重做");
-    dirty = true;
+    const ops = diffProjects(current, next, { tabId: TAB_ID, author: proofreader(), baseRevision: cursor });
+    if (ops.length) appendOps(ops);
   };
 
   const switchTrack = (trackId: string) => {
@@ -211,8 +314,8 @@ export default function OralHistoryEditor() {
   const splitSelection = () => {
     const segment = activeSegment();
     if (!segment || segment.text.trim().length < 2) return;
-    const cursor = editorRef?.selectionStart ?? Math.floor(segment.text.length / 2);
-    const safeCursor = Math.max(1, Math.min(cursor, segment.text.length - 1));
+    const cursorPosition = editorRef?.selectionStart ?? Math.floor(segment.text.length / 2);
+    const safeCursor = Math.max(1, Math.min(cursorPosition, segment.text.length - 1));
     const firstText = segment.text.slice(0, safeCursor).trim();
     const secondText = segment.text.slice(safeCursor).trim();
     if (!firstText || !secondText) return;
@@ -279,7 +382,7 @@ export default function OralHistoryEditor() {
     commitSegment("添加批注", (segment) => {
       segment.comments.unshift({
         id: uid("comment"),
-        author: "当前校对员",
+        author: proofreader(),
         body,
         createdAt: new Date().toISOString(),
         resolved: false,
@@ -297,7 +400,7 @@ export default function OralHistoryEditor() {
       const comment = segment.comments.find((item) => item.id === commentId);
       comment?.replies.push({
         id: uid("reply"),
-        author: "当前校对员",
+        author: proofreader(),
         body,
         createdAt: new Date().toISOString(),
       });
@@ -321,12 +424,18 @@ export default function OralHistoryEditor() {
     });
   };
 
+  /** 字幕导出只读主状态：待合并字段在状态里保持已确定的基线版本。 */
   const exportSrt = () => {
-    const lines = activeTrack().segments.map((segment, index) => {
+    const track = activeTrack();
+    const lines = track.segments.map((segment, index) => {
       const speaker = speakerById(segment.speakerId)?.name ?? "未知";
       return `${index + 1}\n${formatTime(segment.start)} --> ${formatTime(segment.end)}\n${speaker}：${segment.text}\n`;
     });
-    downloadText(`${project().title}-${activeTrack().name}.srt`, lines.join("\n"), "application/x-subrip;charset=utf-8");
+    downloadText(`${project().title}-${track.name}.srt`, lines.join("\n"), "application/x-subrip;charset=utf-8");
+    const pendingCount = pendingList().length;
+    setLastAction(pendingCount
+      ? `已导出 SRT：仅采用已确定版本，${pendingCount} 处待合并字段仍按基线值导出`
+      : "已导出 SRT 字幕");
   };
 
   const importFile = async (file: File) => {
@@ -343,36 +452,49 @@ export default function OralHistoryEditor() {
     });
   };
 
-  const resolveConflict = (useIncoming: boolean) => {
-    const incoming = conflict();
-    if (!incoming) return;
-    if (useIncoming) {
-      setPast((items) => [...items.slice(-49), structuredClone(project())]);
-      setProject(structuredClone(incoming.project));
-      setRevision(incoming.revision + 1);
-      setSelectedId(incoming.project.tracks.find((track) => track.id === incoming.project.activeTrackId)?.segments[0]?.id ?? "");
-      setLastAction("已采用其他标签页的版本");
-      dirty = true;
-    } else {
-      setRevision((value) => value + 1);
-      setLastAction("已保留本页并覆盖冲突版本");
-      dirty = true;
-    }
-    setConflict(null);
+  /** 人工选择某一版：以 resolve 操作追加进日志，双方标签页都会收敛到该版本。 */
+  const resolvePending = (conflict: PendingConflict, side: ConflictSide) => {
+    const op: FieldOp = {
+      id: uid("op"),
+      tabId: TAB_ID,
+      author: proofreader(),
+      baseRevision: cursor,
+      createdAt: new Date().toISOString(),
+      trackId: conflict.trackId,
+      segmentId: conflict.segmentId,
+      field: "resolve",
+      value: { field: conflict.field, value: side.value },
+    };
+    appendOps([op]);
+    setLastAction(`已采用 ${side.author} 的${FIELD_LABELS[conflict.field]}，该字段已确定`);
+  };
+
+  const formatFieldValue = (field: ConflictField, value: unknown) => {
+    if (value === undefined || value === null || value === "") return "（空）";
+    if (field === "speakerId") return speakerById(String(value))?.name ?? String(value);
+    if (field === "start" || field === "end") return formatTime(Number(value) || 0);
+    if (field === "confidence") return `${value}/5`;
+    return String(value);
+  };
+
+  const segmentLocator = (conflict: PendingConflict) => {
+    const track = project().tracks.find((item) => item.id === conflict.trackId);
+    const index = track?.segments.findIndex((item) => item.id === conflict.segmentId) ?? -1;
+    if (!track || index < 0) return `${track?.name ?? "未知轨道"} · 片段已删除`;
+    const segment = track.segments[index];
+    return `${track.name} · 片段 ${index + 1} · ${formatTime(segment.start, false)}`;
   };
 
   onMount(() => {
     hydrated = true;
-    const handleOnline = () => setOnline(true);
+    const handleOnline = () => {
+      setOnline(true);
+      // 离线的一方恢复联网后，只在字段层合并共享日志里的追加变更。
+      catchUp();
+    };
     const handleOffline = () => setOnline(false);
     const handleStorage = (event: StorageEvent) => {
-      if (event.key !== "sologsb-1007-project-v1" || !event.newValue) return;
-      try {
-        const incoming = JSON.parse(event.newValue) as PersistedEnvelope;
-        if (incoming.tabId !== TAB_ID && incoming.revision > revision()) setConflict(incoming);
-      } catch {
-        // Ignore unrelated or malformed storage events.
-      }
+      if (event.key === OPS_KEY) catchUp();
     };
     const handleKeydown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -385,10 +507,10 @@ export default function OralHistoryEditor() {
       }
       if (command && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        const envelope = saveProject(project(), revision(), TAB_ID);
+        catchUp();
+        saveProject(project(), revision(), TAB_ID, cursor);
         setSaveStatus("saved");
         setLastAction("已保存本地草稿");
-        channel?.postMessage(envelope);
         return;
       }
       if (editing) return;
@@ -422,9 +544,7 @@ export default function OralHistoryEditor() {
     });
   });
 
-  channel?.addEventListener("message", (event: MessageEvent<PersistedEnvelope>) => {
-    if (event.data.tabId !== TAB_ID && event.data.revision > revision()) setConflict(event.data);
-  });
+  channel?.addEventListener("message", () => catchUp());
 
   createEffect(() => {
     const current = project();
@@ -433,12 +553,8 @@ export default function OralHistoryEditor() {
     setSaveStatus(online() ? "saving" : "offline");
     window.clearTimeout(saveTimer);
     saveTimer = window.setTimeout(() => {
-      const envelope = saveProject(current, currentRevision, TAB_ID);
+      saveProject(current, currentRevision, TAB_ID, cursor);
       setSaveStatus(online() ? "saved" : "offline");
-      if (dirty) {
-        channel?.postMessage(envelope);
-        dirty = false;
-      }
     }, 420);
   });
 
@@ -454,21 +570,16 @@ export default function OralHistoryEditor() {
 
   return (
     <div class="app-shell">
-      <Show when={conflict()}>
-        {(incoming) => (
-          <div class="conflict-banner" role="alert">
-            <div>
-              <strong>检测到另一个标签页修改了同一草稿</strong>
-              <span>
-                对方版本保存于 {new Date(incoming().savedAt).toLocaleTimeString()}。为避免静默覆盖，请选择要保留的版本。
-              </span>
-            </div>
-            <div class="conflict-actions">
-              <button class="btn btn-quiet" onClick={() => resolveConflict(false)}>保留本页</button>
-              <button class="btn btn-danger" onClick={() => resolveConflict(true)}>载入对方版本</button>
-            </div>
+      <Show when={pendingList().length > 0}>
+        <div class="merge-banner" role="alert">
+          <div>
+            <strong>有 {pendingList().length} 个字段被两位校对员同时修改</strong>
+            <span>两个版本都已保留在待合并区；人工选择前，字幕导出只采用已确定的基线版本。</span>
           </div>
-        )}
+          <div class="conflict-actions">
+            <button class="btn btn-quiet" onClick={() => setMergeOpen(true)}>打开待合并区</button>
+          </div>
+        </div>
       </Show>
 
       <header class="topbar">
@@ -486,9 +597,23 @@ export default function OralHistoryEditor() {
           </div>
         </div>
         <div class="top-actions">
+          <label class="proofreader-chip" title="每笔字段变更都会记录校对员">
+            校对员
+            <input
+              aria-label="校对员姓名"
+              value={proofreader()}
+              onChange={(event) => {
+                setProofreader(event.currentTarget.value);
+                saveProofreader(event.currentTarget.value);
+              }}
+            />
+          </label>
           <span class={`network-chip ${online() ? "online" : "offline"}`}>{online() ? "在线" : "离线可编辑"}</span>
           <button class="icon-btn" title="撤销 Ctrl/Cmd+Z" disabled={!past().length} onClick={undo}>↶</button>
           <button class="icon-btn" title="重做 Ctrl/Cmd+Shift+Z" disabled={!future().length} onClick={redo}>↷</button>
+          <button class="btn btn-quiet" disabled={!pendingList().length} onClick={() => setMergeOpen(true)}>
+            待合并<span class="merge-count">{pendingList().length}</span>
+          </button>
           <button class="btn btn-quiet" onClick={() => setHelpOpen(true)}>快捷键 <kbd>?</kbd></button>
           <button class="btn btn-primary" onClick={exportSrt}>导出 SRT</button>
         </div>
@@ -503,7 +628,7 @@ export default function OralHistoryEditor() {
               <span>{project().tracks.flatMap((track) => track.segments).filter((segment) => segment.reviewed).length} / {project().tracks.flatMap((track) => track.segments).length} 片段</span>
             </div>
             <div class="progress-track"><i style={{ width: `${completedPercent()}%` }} /></div>
-            <p>修改会自动保存在本机；断网后仍可继续校对。</p>
+            <p>修改以字段级变更追加保存；断网后仍可继续校对，恢复联网后自动按字段合并。</p>
           </section>
 
           <section class="panel-section">
@@ -541,7 +666,7 @@ export default function OralHistoryEditor() {
               <span><i style={{ background: "#b45309" }} />事件</span>
               <span><i style={{ background: "#be185d" }} />人物</span>
             </div>
-            <p>在右侧“标注”页把当前片段关联到主题、事件和人物。</p>
+            <p>在右侧“标注”页把当前片段关联到主题、事件和人物；双方关联在合并时取并集。</p>
           </section>
         </aside>
 
@@ -580,6 +705,7 @@ export default function OralHistoryEditor() {
                       <Show when={segment.flags.lowConfidence}><span class="pill alert">低置信</span></Show>
                       <Show when={segment.flags.dialect}><span class="pill dialect">方言</span></Show>
                       <Show when={segment.flags.properNoun}><span class="pill proper">专名</span></Show>
+                      <Show when={pendingBySegment().has(segment.id)}><span class="pill merge">待合并</span></Show>
                       <Show when={segment.reviewed}><span class="pill done">✓ 已校对</span></Show>
                     </div>
                     <p>{segment.text}</p>
@@ -687,7 +813,7 @@ export default function OralHistoryEditor() {
                 </Tabs.Content>
 
                 <Tabs.Content value="comments" class="tab-content comments-content">
-                  <div class="content-title"><h3>批注与回复</h3><p>批注不会改写原文，可保留校对依据并继续讨论。</p></div>
+                  <div class="content-title"><h3>批注与回复</h3><p>批注不会改写原文，合并时按新编号追加，双方记录都会保留。</p></div>
                   <div class="comment-compose">
                     <textarea rows="3" placeholder="记录读音、词义或专名依据…" value={commentDraft()} onInput={(event) => setCommentDraft(event.currentTarget.value)} />
                     <button class="btn btn-primary" onClick={addComment}>添加批注</button>
@@ -722,7 +848,7 @@ export default function OralHistoryEditor() {
 
       <footer class="statusbar">
         <span>最近操作：{lastAction()}</span>
-        <span>版本 {revision() + 1} · 本地草稿</span>
+        <span>版本 {revision() + 1} · 本地草稿 · 待合并 {pendingList().length}</span>
         <span class="status-shortcuts">J/K 浏览　R 已校对　M 合并　? 帮助</span>
       </footer>
 
@@ -743,6 +869,46 @@ export default function OralHistoryEditor() {
               <span><kbd>?</kbd> 显示本帮助</span>
             </div>
             <div class="dialog-footer"><button class="btn btn-primary" onClick={() => setHelpOpen(false)}>开始校对</button></div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog>
+
+      <Dialog open={mergeOpen()} onOpenChange={setMergeOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay class="dialog-overlay" />
+          <Dialog.Content class="dialog-content merge-dialog">
+            <Dialog.Title>待合并区</Dialog.Title>
+            <Dialog.Description>
+              以下字段被两位校对员基于同一版本同时修改，两个版本都已保留。选择要采用的一版；未确定的字段在字幕导出中继续使用基线版本。
+            </Dialog.Description>
+            <For each={pendingList()} fallback={<div class="mini-empty">待合并区是空的，所有字段都已确定。</div>}>
+              {(conflict) => (
+                <article class="merge-item">
+                  <header>
+                    <strong>{FIELD_LABELS[conflict.field]}</strong>
+                    <span>{segmentLocator(conflict)}</span>
+                  </header>
+                  <div class="merge-baseline">基线版本：{formatFieldValue(conflict.field, conflict.baselineValue)}</div>
+                  <div class="merge-sides">
+                    <For each={conflict.sides}>
+                      {(side) => (
+                        <div class="merge-side">
+                          <header>
+                            <b>{side.author}</b>
+                            <time>{new Date(side.at).toLocaleString()}</time>
+                          </header>
+                          <p>{formatFieldValue(conflict.field, side.value)}</p>
+                          <button class="btn btn-primary" onClick={() => resolvePending(conflict, side)}>采用此版本</button>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                </article>
+              )}
+            </For>
+            <div class="dialog-footer">
+              <button class="btn btn-quiet" onClick={() => setMergeOpen(false)}>稍后处理</button>
+            </div>
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog>

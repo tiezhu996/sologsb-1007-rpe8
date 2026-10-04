@@ -4,39 +4,36 @@ import type { PersistedEnvelope, ProjectData } from "./types";
 export const STORAGE_KEY = "sologsb-1007-project-v1";
 export const SESSION_KEY = "sologsb-1007-session";
 
-export function loadProject(): { project: ProjectData; revision: number } {
+export function loadProject(): { project: ProjectData; revision: number; opCursor: number } {
   if (typeof localStorage === "undefined") {
-    return { project: createSeedProject(), revision: 0 };
+    return { project: createSeedProject(), revision: 0, opCursor: 0 };
   }
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "") as PersistedEnvelope;
     if (parsed?.schema === 1 && parsed.project?.tracks?.length) {
-      return { project: parsed.project, revision: parsed.revision ?? 0 };
+      return {
+        project: parsed.project,
+        revision: parsed.revision ?? 0,
+        opCursor: parsed.opCursor ?? 0,
+      };
     }
   } catch {
     // A malformed local draft falls back to the bundled sample.
   }
-  return { project: createSeedProject(), revision: 0 };
+  return { project: createSeedProject(), revision: 0, opCursor: 0 };
 }
 
-export function saveProject(project: ProjectData, revision: number, tabId: string) {
+export function saveProject(project: ProjectData, revision: number, tabId: string, opCursor: number) {
   const envelope: PersistedEnvelope = {
     schema: 1,
     revision,
     tabId,
     savedAt: Date.now(),
+    opCursor,
     project,
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
   return envelope;
-}
-
-export function readEnvelope(): PersistedEnvelope | null {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "") as PersistedEnvelope;
-  } catch {
-    return null;
-  }
 }
 
 export function downloadText(filename: string, content: string, type = "text/plain;charset=utf-8") {
