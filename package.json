@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build && node scripts/emit-static.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:merge": "esbuild scripts/test-merge.ts --bundle --platform=node --format=esm --outfile=.tmp/test-merge.mjs && node .tmp/test-merge.mjs",
+    "test:integration": "esbuild scripts/test-integration.ts --bundle --platform=node --format=esm --outfile=.tmp/test-integration.mjs && node .tmp/test-integration.mjs",
+    "test:component": "vite build --config vite.test.config.ts && node .tmp/ssr-test/test-component.js",
+    "test": "npm run test:merge && npm run test:integration && npm run test:component"
   },
   "dependencies": {
     "@kobalte/core": "^0.13.14",
@@ -16,6 +20,8 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.2",
+    "esbuild": "^0.28.2",
+    "jsdom": "^29.1.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.1"
   }

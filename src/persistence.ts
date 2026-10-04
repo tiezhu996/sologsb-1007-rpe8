@@ -1,42 +1,91 @@
 import { createSeedProject } from "./data";
-import type { PersistedEnvelope, ProjectData } from "./types";
+import { mergeEnvelopes } from "./sync";
+import type { ChangeEnvelope, PersistedEnvelopeV1, ProjectData } from "./types";
 
-export const STORAGE_KEY = "sologsb-1007-project-v1";
+export const STORAGE_KEY = "sologsb-1007-project-v2";
+export const LEGACY_STORAGE_KEY = "sologsb-1007-project-v1";
 export const SESSION_KEY = "sologsb-1007-session";
+export const PROOFREADER_KEY = "sologsb-1007-proofreader";
 
-export function loadProject(): { project: ProjectData; revision: number } {
-  if (typeof localStorage === "undefined") {
-    return { project: createSeedProject(), revision: 0 };
-  }
+function readRawEnvelope(): ChangeEnvelope | null {
+  if (typeof localStorage === "undefined") return null;
   try {
-    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "") as PersistedEnvelope;
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "") as ChangeEnvelope;
+    if (parsed?.schema === 2 && parsed.baseline?.tracks?.length) return parsed;
+  } catch {
+    // Malformed envelope: fall through to migration/seed.
+  }
+  return null;
+}
+
+function migrateV1(): ChangeEnvelope | null {
+  if (typeof localStorage === "undefined") return null;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LEGACY_STORAGE_KEY) ?? "") as PersistedEnvelopeV1;
     if (parsed?.schema === 1 && parsed.project?.tracks?.length) {
-      return { project: parsed.project, revision: parsed.revision ?? 0 };
+      const envelope: ChangeEnvelope = {
+        schema: 2,
+        tabId: parsed.tabId ?? "legacy",
+        savedAt: parsed.savedAt ?? Date.now(),
+        baseline: parsed.project,
+        ops: [],
+      };
+      persistEnvelope(envelope);
+      return envelope;
     }
   } catch {
-    // A malformed local draft falls back to the bundled sample.
+    // Ignore unreadable legacy draft.
   }
-  return { project: createSeedProject(), revision: 0 };
+  return null;
 }
 
-export function saveProject(project: ProjectData, revision: number, tabId: string) {
-  const envelope: PersistedEnvelope = {
-    schema: 1,
-    revision,
-    tabId,
+/**
+ * 载入追加式草稿：v2 日志优先；旧的 v1 整稿快照自动迁移为“基线 + 空日志”。
+ */
+export function loadEnvelope(): ChangeEnvelope {
+  const existing = readRawEnvelope();
+  if (existing) return existing;
+  const migrated = migrateV1();
+  if (migrated) return migrated;
+  return {
+    schema: 2,
+    tabId: "seed",
     savedAt: Date.now(),
-    project,
+    baseline: createSeedProject(),
+    ops: [],
   };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
-  return envelope;
 }
 
-export function readEnvelope(): PersistedEnvelope | null {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "") as PersistedEnvelope;
-  } catch {
-    return null;
-  }
+/** 直接写入信封（迁移等场景）。 */
+export function persistEnvelope(envelope: ChangeEnvelope) {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+}
+
+/**
+ * 追加式保存：以操作 id 与本机已有的日志并集，绝不整份覆盖对方操作。
+ * 基线在所有标签页之间共享同一份（来自初次建稿/迁移）。
+ */
+export function saveEnvelope(envelope: ChangeEnvelope): ChangeEnvelope {
+  if (typeof localStorage === "undefined") return envelope;
+  const current = readRawEnvelope();
+  const merged = mergeEnvelopes(current, envelope);
+  persistEnvelope(merged);
+  return merged;
+}
+
+export function readEnvelope(): ChangeEnvelope | null {
+  return readRawEnvelope();
+}
+
+export function loadProofreaderName(fallback: string) {
+  if (typeof localStorage === "undefined") return fallback;
+  return localStorage.getItem(PROOFREADER_KEY)?.trim() || fallback;
+}
+
+export function saveProofreaderName(name: string) {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(PROOFREADER_KEY, name);
 }
 
 export function downloadText(filename: string, content: string, type = "text/plain;charset=utf-8") {
@@ -67,3 +116,5 @@ export function parseTime(value: string) {
   if (parts.length === 2) return parts[0] * 60 + parts[1];
   return Number(normalized) || 0;
 }
+
+export type { ProjectData };

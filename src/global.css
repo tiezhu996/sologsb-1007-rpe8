@@ -200,3 +200,50 @@ kbd { padding: 2px 5px; border: 1px solid rgba(0,0,0,.15); border-bottom-width: 
   .top-actions { gap: 5px; }
   .network-chip { display: none; }
 }
+
+/* ---- 追加式字段合并 / 待合并区 ---- */
+.proofreader-field { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #91a0ad; white-space: nowrap; }
+.proofreader-field input { width: 96px; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.07); color: #fff; border-radius: 7px; padding: 6px 8px; }
+.pending-btn { border: 1px solid rgba(237,172,90,.5); background: rgba(223,170,103,.16); color: #f3c58d; border-radius: 99px; padding: 7px 12px; font-size: 12px; font-weight: 650; cursor: pointer; }
+.pending-btn.active { background: #dfaa67; color: #201609; border-color: #dfaa67; }
+.pending-btn:hover { filter: brightness(1.1); }
+
+.merge-banner { display: flex; align-items: center; gap: 12px; padding: 9px 20px; font-size: 12px; border-bottom: 1px solid; }
+.merge-banner > span:first-child { font-size: 15px; }
+.merge-banner.merged { color: #14532d; background: #e9f7ee; border-color: #bfe6cd; }
+.merge-banner.conflict { color: #6c2e0e; background: #fff1d6; border-color: #efd09b; }
+.merge-banner strong { font-weight: 650; flex: 1; }
+.merge-banner .btn { padding: 5px 11px; font-size: 11px; }
+
+.segment-card.conflicted { border-color: #e3a45f; background: #fffaf2; box-shadow: inset 3px 0 #d97706; }
+.pill.conflict { background: #fde7c8; color: #92500c; cursor: pointer; border: 1px solid #f0cf9d; font-weight: 700; }
+.pill.conflict:hover { background: #fbd9a6; }
+
+.inline-conflicts { border: 1px solid #f0cf9d; background: #fff8ed; border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; display: grid; gap: 6px; }
+.inline-conflicts > strong { font-size: 11px; color: #92500c; }
+.inline-conflicts small { font-size: 10px; color: #a07b4f; line-height: 1.5; }
+.inline-conflict-row { display: flex; justify-content: space-between; align-items: center; font-size: 11px; }
+.inline-conflict-row span { color: #5e6870; }
+.inline-conflict-row button { border: 0; background: transparent; color: #b45309; font-weight: 700; cursor: pointer; font-size: 11px; }
+
+.dialog-content.pending-dialog { width: min(760px, calc(100vw - 40px)); max-height: 84vh; display: flex; flex-direction: column; padding: 22px 24px; }
+.dialog-content.small-dialog { width: min(460px, calc(100vw - 40px)); }
+.pending-list { overflow-y: auto; display: grid; gap: 12px; padding-right: 4px; margin: 4px 0 14px; }
+.pending-item { border: 1px solid #e5dcc9; border-radius: 11px; padding: 13px 14px; background: #fff; }
+.pending-item > header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 4px; }
+.pending-item > header strong { display: block; font-size: 13px; color: #7c4a12; }
+.pending-item > header small { display: block; font-size: 10px; color: #8b949b; margin-top: 2px; }
+.locate-link { border: 0; background: transparent; color: #28609d; cursor: pointer; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.pending-context { margin: 4px 0 10px; font-size: 11px; color: #8a8170; line-height: 1.5; border-left: 2px solid #e5dcc9; padding-left: 8px; }
+.candidate-list { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.candidate-card { text-align: left; border: 1px solid #d9d6cc; border-radius: 9px; background: #fcfbf8; padding: 10px 11px; cursor: pointer; display: grid; gap: 5px; transition: border-color .12s ease, background .12s ease; }
+.candidate-card:hover { border-color: #dfaa67; background: #fffaf2; }
+.candidate-card.winning { border-color: #e3a45f; background: #fff6e8; }
+.candidate-meta { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.candidate-meta b { font-size: 11px; color: #303943; }
+.candidate-meta span { font-size: 9px; color: #9aa2a9; }
+.candidate-meta em { font-style: normal; font-size: 9px; color: #b45309; background: #fde7c8; border-radius: 99px; padding: 1px 7px; margin-left: auto; }
+.candidate-card p { margin: 0; font-size: 12px; line-height: 1.55; color: #2b343b; white-space: pre-wrap; word-break: break-word; }
+.choose-link { font-size: 10px; font-weight: 750; color: #1f5fbf; }
+.pending-footer { display: flex; justify-content: space-between; gap: 8px; border-top: 1px solid #e8e6df; padding-top: 12px; }
+.dialog-content.small-dialog .dialog-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
